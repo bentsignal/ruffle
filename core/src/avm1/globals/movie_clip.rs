@@ -976,11 +976,11 @@ pub fn clone_sprite<'gc>(
     let movie = parent.movie();
     #[allow(clippy::question_mark)]
     let cloned_sprite = if sprite.id() != 0 {
-        // Clip from SWF; instantiate a new copy.
-        let library = context.library.library_for_movie(movie).unwrap();
-        library
-            .instantiate_by_id(sprite.id(), context.gc())
-            .unwrap()
+        // Clip from SWF; instantiate a new copy. Character IDs belong to the
+        // SWF that defined the clip, which differs from the parent's when the
+        // clip came in through ImportAssets.
+        let library = context.library.library_for_movie(sprite.movie())?;
+        library.instantiate_by_id(sprite.id(), context.gc())?
     } else if sprite.as_movie_clip().is_some() {
         // Dynamically created MovieClip; create a new empty movie clip.
         MovieClip::new(movie, context.gc()).as_displayobject()
