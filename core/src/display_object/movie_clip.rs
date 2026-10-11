@@ -622,13 +622,26 @@ impl<'gc> MovieClip<'gc> {
         is_finished
     }
 
-    pub fn finish_importing(self) {
-        self.0
-            .shared
-            .get()
-            .preload_progress
-            .awaiting_import
-            .set(false);
+    pub fn finish_importing(self, context: &mut UpdateContext<'gc>) {
+        let shared = self.0.shared.get();
+        shared.preload_progress.awaiting_import.set(false);
+        // A movie loaded for ImportAssets is not on the display list, so nothing
+        // else resumes its preload once its own (nested) import arrives. Resume it
+        // here, and only release the importer once it has fully preloaded, so
+        // exports that follow a nested ImportAssets tag still reach the importer.
+        if let Some(importer) = shared.importer_movie {
+            let mut limit = ExecutionLimit::none();
+            let done = self.preload(context, &mut limit);
+            tracing::debug!(
+                "resumed import {} -> finished {} (importer {})",
+                self.movie().url(),
+                done,
+                importer.movie().url()
+            );
+            if done {
+                importer.finish_importing(context);
+            }
+        }
     }
 
     #[inline]
@@ -4028,12 +4041,21 @@ impl<'gc, 'a> MovieClipShared<'gc> {
             })
             .collect::<HashMap<AvmString<'gc>, (CharacterId, Character<'gc>)>>();
 
+        // Character IDs are local to each SWF, so the importer's IDs must not be
+        // reused here: they collide with this movie's own definitions (and a
+        // colliding DefineSprite stops preloading). Expose the importer's
+        // exports by name under free IDs counted down from the top instead.
         let self_library = self.library_mut(context);
-        for (name, (id, character)) in exported_from_importer {
-            if self_library.character_by_id(id).is_none() {
-                self_library.register_character(id, character);
-                self_library.register_export(id, name);
+        let mut next_id = CharacterId::MAX;
+        for (name, (_id, character)) in exported_from_importer {
+            if self_library.character_by_export_name(&name).is_some() {
+                continue;
             }
+            while self_library.contains_character(next_id) {
+                next_id -= 1;
+            }
+            self_library.register_character(next_id, character);
+            self_library.register_export(next_id, name);
         }
     }
 

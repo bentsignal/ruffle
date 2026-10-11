@@ -377,14 +377,18 @@ impl<'gc> LoadManager<'gc> {
                                 url,
                                 res
                             );
+                            // Unfinished means the imported movie is waiting on its own
+                            // import; `finish_importing` releases our importer later.
+                            if res {
+                                importer_movie.finish_importing(uc);
+                            }
                         } else {
                             tracing::warn!(
                                 "Unsupported content type for ImportAssets: {:?}",
                                 content_type
                             );
+                            importer_movie.finish_importing(uc);
                         }
-
-                        importer_movie.finish_importing();
                     });
                     Ok(())
                 }
