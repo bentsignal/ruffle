@@ -2,7 +2,7 @@ name: Fork native core
 
 on:
   pull_request:
-    branches: [master]
+    branches: [master, csgo-scaleform]
   push:
     branches: [diagnostics/**]
 
