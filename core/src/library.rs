@@ -96,7 +96,7 @@ pub struct MovieLibrary<'gc> {
     swf: SwfMovie<'gc>,
     characters: HashMap<CharacterId, Character<'gc>>,
     export_characters: Avm1PropertyMap<'gc, CharacterId>,
-    imported_assets: HashMap<AvmString<'gc>, CharacterId>,
+    imported_assets: HashMap<AvmString<'gc>, Vec<CharacterId>>,
     jpeg_tables: Option<Vec<u8>>,
     fonts: FontMap<'gc>,
     avm2_domain: Option<Avm2Domain<'gc>>,
@@ -188,11 +188,21 @@ impl<'gc> MovieLibrary<'gc> {
     }
 
     pub fn character_id_by_import_name(&self, name: &WStr) -> Option<CharacterId> {
-        self.imported_assets.get(name).copied()
+        self.imported_assets.get(name)?.last().copied()
+    }
+
+    /// Every local alias of an imported name, in registration order. The last
+    /// ID retains the existing singular name lookup/export behavior.
+    pub fn character_ids_by_import_name(&self, name: &WStr) -> Option<&[CharacterId]> {
+        self.imported_assets.get(name).map(Vec::as_slice)
     }
 
     pub fn register_import(&mut self, name: AvmString<'gc>, id: CharacterId) {
-        self.imported_assets.insert(name, id);
+        let ids = self.imported_assets.entry(name).or_default();
+        // Re-registering the same alias must not duplicate character creation,
+        // but it still becomes the latest name-based choice, as before.
+        ids.retain(|registered| *registered != id);
+        ids.push(id);
     }
 
     /// Instantiates the library item with the given character ID into a display object.
@@ -829,5 +839,38 @@ impl<'gc> FontMap<'gc> {
 
     pub fn iter_all(&self) -> impl Iterator<Item = Font<'gc>> {
         self.0.values().copied()
+    }
+}
+
+#[cfg(test)]
+mod import_alias_tests {
+    use super::*;
+    use crate::tag_utils::SwfMovieData;
+
+    #[test]
+    fn import_aliases_keep_last_lookup_without_duplicate_ids() {
+        gc_arena::arena::rootless_mutate(|mc| {
+            let movie = SwfMovie::new(mc, SwfMovieData::empty(8, None));
+            let mut library = MovieLibrary::new(movie);
+            let name = AvmString::new_utf8(mc, "synthetic_alias");
+            library.register_import(name, 35);
+            library.register_import(AvmString::new_utf8(mc, "synthetic_alias"), 99);
+            assert_eq!(
+                library.character_ids_by_import_name(&name),
+                Some(&[35, 99][..])
+            );
+            assert_eq!(library.character_id_by_import_name(&name), Some(99));
+
+            library.register_import(name, 35);
+            library.register_import(name, 35);
+            assert_eq!(
+                library.character_ids_by_import_name(&name),
+                Some(&[99, 35][..])
+            );
+            assert_eq!(library.character_id_by_import_name(&name), Some(35));
+            let different_case = AvmString::new_utf8(mc, "Synthetic_alias");
+            assert_eq!(library.character_ids_by_import_name(&different_case), None);
+            assert_eq!(library.character_id_by_import_name(&different_case), None);
+        });
     }
 }

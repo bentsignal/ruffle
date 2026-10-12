@@ -34,7 +34,7 @@ use crate::events::ClipEvent;
 use crate::limits::ExecutionLimit;
 use crate::player::{Player, PostFrameCallback};
 use crate::streams::{NetStream, NetStreamHandle};
-use crate::string::{AvmString, StringContext};
+use crate::string::{AvmString, StringContext, WString};
 use crate::tag_utils::{SwfMovie, SwfMovieData};
 use crate::vminterface::Instantiator;
 use chardetng::EncodingDetector;
@@ -330,13 +330,14 @@ impl<'gc> LoadManager<'gc> {
         uc: &UpdateContext<'gc>,
         request: Request,
         importer_movie: MovieClip<'gc>,
+        imported_assets: Vec<(WString, swf::CharacterId)>,
     ) -> OwnedFuture<(), Error> {
         // TODO: Observe more closely how this should behave in AVM2.
         // It looks like AVM2 is more strict than AVM1 regarding when
         // something is not a valid import, and doesn't continue
         // executing when that is the case(?).
         let player = uc.player_handle();
-        let importer_movie = MovieClipHandle::stash(uc, importer_movie);
+        let importer_handle = MovieClipHandle::stash_import_assets(uc, importer_movie);
 
         Box::pin(async move {
             let fetch = player.lock().unwrap().fetch(request, FetchReason::LoadSwf);
@@ -349,7 +350,9 @@ impl<'gc> LoadManager<'gc> {
                     tracing::info!("Loading imported movie: {:?}", url);
 
                     player.lock().unwrap().mutate_with_update_context(|uc| {
-                        let importer_movie = importer_movie.fetch(uc);
+                        let Some(importer_movie) = importer_handle.fetch(uc) else {
+                            return;
+                        };
 
                         if matches!(content_type, ContentType::Swf) {
                             let movie = SwfMovieData::from_data(
@@ -362,7 +365,12 @@ impl<'gc> LoadManager<'gc> {
 
                             let movie = SwfMovie::new(uc.gc(), movie);
 
-                            let clip = MovieClip::new_import_assets(uc, movie, importer_movie);
+                            let clip = MovieClip::new_import_assets(
+                                uc,
+                                movie,
+                                importer_movie,
+                                imported_assets,
+                            );
 
                             clip.set_cur_preload_frame(0);
                             let mut execution_limit = ExecutionLimit::none();
@@ -380,14 +388,14 @@ impl<'gc> LoadManager<'gc> {
                             // Unfinished means the imported movie is waiting on its own
                             // import; `finish_importing` releases our importer later.
                             if res {
-                                importer_movie.finish_importing(uc);
+                                importer_handle.finish_importing(uc);
                             }
                         } else {
                             tracing::warn!(
                                 "Unsupported content type for ImportAssets: {:?}",
                                 content_type
                             );
-                            importer_movie.finish_importing(uc);
+                            importer_handle.finish_importing(uc);
                         }
                     });
                     Ok(())
