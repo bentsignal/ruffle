@@ -292,7 +292,17 @@ impl<'gc> Object<'gc> {
         let (method, depth) =
             match search_prototype(Value::Object(self), name, activation, self, call_resolve_fn)? {
                 Some((Value::Object(method), depth)) => (method, depth),
-                _ => return Ok(Value::Undefined),
+                _ => {
+                    super::missing_calls::log(
+                        &name,
+                        if self.as_display_object().is_some() {
+                            "movieclip"
+                        } else {
+                            "object"
+                        },
+                    );
+                    return Ok(Value::Undefined);
+                }
             };
 
         // If the method was found on the object itself, change `depth` as-if

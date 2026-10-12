@@ -904,6 +904,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         // Can not call method on undefined/null.
         if matches!(object_val, Value::Undefined | Value::Null) {
+            if let Value::String(name) = method_name {
+                super::missing_calls::log(
+                    &name,
+                    if object_val == Value::Null {
+                        "null"
+                    } else {
+                        "undefined"
+                    },
+                );
+            }
             self.stack_push(Value::Undefined);
             return Ok(FrameControl::Continue);
         }
@@ -1206,6 +1216,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let object = object_val.coerce_to_object_or_bare(self)?;
 
         let result = object.get(name, self)?;
+        if result == Value::Undefined {
+            super::missing_calls::log_api_identifier(&name);
+        }
         self.stack_push(result);
 
         Ok(FrameControl::Continue)
@@ -1268,6 +1281,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let path = var_path.coerce_to_string(self)?;
 
         let value: Value<'gc> = self.get_variable(path)?.into();
+
+        if value == Value::Undefined {
+            super::missing_calls::log_api_identifier(&path);
+        }
 
         let value = if self.swf_version() <= 4 {
             value.as_swf4_variable()
@@ -3187,5 +3204,70 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         self.set_scope(Scope::new_target_scope(self.scope(), clip_obj, self.gc()));
         Ok(FrameControl::Continue)
+    }
+}
+
+#[cfg(test)]
+mod missing_call_tests {
+    use super::*;
+    use crate::avm1::test_utils::with_avm;
+
+    #[test]
+    fn missing_calls_preserve_undefined_and_continue() {
+        with_avm(7, |activation, this| {
+            let name = AvmString::new_utf8(activation.gc(), "synthetic_missing_callable");
+            activation.context.avm1.push(0.0.into());
+            activation.context.avm1.push(name.into());
+            assert!(matches!(
+                activation.action_call_function()?,
+                FrameControl::Continue
+            ));
+            assert_eq!(activation.context.avm1.pop(), Value::Undefined);
+
+            for receiver in [Value::Object(this), Value::Null, Value::Undefined] {
+                activation.context.avm1.push(0.0.into());
+                activation.context.avm1.push(receiver);
+                activation.context.avm1.push(name.into());
+                assert!(matches!(
+                    activation.action_call_method()?,
+                    FrameControl::Continue
+                ));
+                assert_eq!(activation.context.avm1.pop(), Value::Undefined);
+            }
+
+            // The next VM operation still executes.
+            activation.context.avm1.push(41.0.into());
+            activation.action_increment()?;
+            assert_eq!(activation.context.avm1.pop(), 42.0.into());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn missing_api_lookups_preserve_undefined_and_continue() {
+        with_avm(7, |activation, this| {
+            for name in ["SyntheticHostAPI", "SyntheticIgnoredField"] {
+                let name = AvmString::new_utf8(activation.gc(), name);
+                activation.context.avm1.push(name.into());
+                assert!(matches!(
+                    activation.action_get_variable()?,
+                    FrameControl::Continue
+                ));
+                assert_eq!(activation.context.avm1.pop(), Value::Undefined);
+
+                activation.context.avm1.push(this.into());
+                activation.context.avm1.push(name.into());
+                assert!(matches!(
+                    activation.action_get_member()?,
+                    FrameControl::Continue
+                ));
+                assert_eq!(activation.context.avm1.pop(), Value::Undefined);
+            }
+
+            activation.context.avm1.push(41.0.into());
+            activation.action_increment()?;
+            assert_eq!(activation.context.avm1.pop(), 42.0.into());
+            Ok(())
+        });
     }
 }

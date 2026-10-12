@@ -1,0 +1,24 @@
+name: Fork native core
+
+on:
+  pull_request:
+    branches: [master, csgo-scaleform]
+  push:
+    branches: [diagnostics/**]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt -p ruffle_core -- --check
+      - run: cargo test -p ruffle_core --lib --locked
+      - run: cargo test -p ruffle_core --lib missing_call --locked
+        env:
+          CSR_AVM_MISSING_CALLS: "1"

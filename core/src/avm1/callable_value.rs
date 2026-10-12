@@ -35,7 +35,20 @@ impl<'gc> CallableValue<'gc> {
             CallableValue::UnCallable(Value::Object(val)) => {
                 val.call(name, activation, default_this, args)
             }
-            _ => Ok(Value::Undefined),
+            value => {
+                let value = Value::from(value);
+                let receiver_type = match value {
+                    Value::Undefined => "undefined",
+                    Value::Null => "null",
+                    Value::Number(_) => "number",
+                    Value::Bool(_) => "boolean",
+                    Value::String(_) => "string",
+                    Value::MovieClip(_) => "movieclip",
+                    Value::Object(_) => "object",
+                };
+                super::missing_calls::log(&name, receiver_type);
+                Ok(Value::Undefined)
+            }
         }
     }
 }
