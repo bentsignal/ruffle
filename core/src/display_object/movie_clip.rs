@@ -313,9 +313,11 @@ impl<'gc> MovieClip<'gc> {
         context: &mut UpdateContext<'gc>,
         movie: SwfMovie<'gc>,
         parent: MovieClip<'gc>,
+        imported_assets: Vec<(WString, CharacterId)>,
     ) -> Self {
         let loader_info = None;
-        let shared = MovieClipShared::for_full_movie(movie, loader_info, Some(parent));
+        let mut shared = MovieClipShared::for_full_movie(movie, loader_info, Some(parent));
+        shared.imported_assets = imported_assets;
 
         let data = MovieClipData::new(shared, context.gc());
         data.flags.set(MovieClipFlags::PLAYING);
@@ -788,6 +790,7 @@ impl<'gc> MovieClip<'gc> {
 
         let mc = context.gc();
         let library = context.library.library_for_movie_mut(self.movie());
+        let mut imported_assets = Vec::with_capacity(exported_assets.len());
 
         for asset in exported_assets {
             let name = asset.name.decode(reader.encoding());
@@ -796,11 +799,12 @@ impl<'gc> MovieClip<'gc> {
             tracing::debug!("Importing asset: {} (ID: {})", name, id);
 
             library.register_import(name, id);
+            imported_assets.push((name.as_wstr().to_owned(), id));
         }
 
         let request = Request::get(asset_url);
 
-        let fut = LoadManager::load_asset_movie(context, request, self);
+        let fut = LoadManager::load_asset_movie(context, request, self, imported_assets);
         self.0
             .shared
             .get()
@@ -4116,10 +4120,21 @@ impl<'gc, 'a> MovieClipShared<'gc> {
                 tracing::debug!("register_export asset: {} (ID: {})", name, export.id);
 
                 if let Some(parent) = importer_movie {
-                    let parent_library = context.library.library_for_movie_mut(parent);
+                    // Bind only this request's aliases. Other imported movies
+                    // can export the same name and finish loading in any order.
+                    let mut ids = Vec::new();
+                    for (import_name, id) in &self.imported_assets {
+                        if import_name == name.as_wstr() {
+                            ids.retain(|registered| registered != id);
+                            ids.push(*id);
+                        }
+                    }
 
-                    if let Some(id) = parent_library.character_id_by_import_name(&name) {
-                        parent_library.register_character(id, character);
+                    for id in ids {
+                        context
+                            .library
+                            .library_for_movie_mut(parent)
+                            .register_character(id, character);
 
                         Self::register_export(context, id, name, parent);
                         tracing::debug!(
@@ -4738,6 +4753,11 @@ struct MovieClipShared<'gc> {
 
     // If this movie was loaded from ImportAssets(2), this will be the root MovieClip of the parent movie.
     importer_movie: Option<MovieClip<'gc>>,
+
+    /// Owned declarations from the exact ImportAssets request that loaded this
+    /// movie. These names contain no GC pointers and remain valid across fetch.
+    #[collect(require_static)]
+    imported_assets: Vec<(WString, CharacterId)>,
 }
 
 #[derive(Default)]
@@ -4809,6 +4829,7 @@ impl<'gc> MovieClipShared<'gc> {
             avm2_class: Lock::new(None),
             loader_info,
             importer_movie,
+            imported_assets: Vec::new(),
         }
     }
 
@@ -5105,6 +5126,151 @@ impl ClipEventHandler {
             effective_events,
             key_code,
             action_data: SwfSlice::from(movie).to_subslice(swf_action.action_data),
+        }
+    }
+}
+
+#[cfg(test)]
+mod import_alias_tests {
+    use super::*;
+
+    #[test]
+    fn import_alias_export_registers_and_instantiates_every_local_id() {
+        for aliases in [&[35, 99][..], &[35, 99, 35][..], &[35][..]] {
+            let player = crate::player::PlayerBuilder::new()
+                .with_movie(SwfMovieData::empty(8, None))
+                .build();
+            let mut player = player.lock().unwrap();
+            player.mutate_with_update_context(|context| {
+                let root = context.stage.root_clip().unwrap().as_movie_clip().unwrap();
+                let importer = root.movie();
+                let exporter = SwfMovie::new(context.gc(), SwfMovieData::empty(8, None));
+                let prototype = MovieClip::new(exporter, context.gc());
+                let name = AvmString::new_utf8(context.gc(), "synthetic_alias");
+                context
+                    .library
+                    .library_for_movie_mut(exporter)
+                    .register_character(7, Character::MovieClip(prototype));
+                for &id in aliases {
+                    context
+                        .library
+                        .library_for_movie_mut(importer)
+                        .register_import(name, id);
+                }
+
+                let imported_assets = aliases
+                    .iter()
+                    .map(|&id| (WString::from_utf8("synthetic_alias"), id))
+                    .collect();
+                let imported =
+                    MovieClip::new_import_assets(context, exporter, root, imported_assets);
+                // One generated ExportAssets entry: ID 7, synthetic name.
+                // No external movies, action bodies, or assets are involved.
+                let mut payload = vec![1, 0, 7, 0];
+                payload.extend_from_slice(b"synthetic_alias\0");
+                imported
+                    .0
+                    .shared
+                    .get()
+                    .export_assets(context, &mut SwfStream::new(&payload, 8))
+                    .unwrap();
+
+                let library = context.library.library_for_movie(importer).unwrap();
+                for &id in aliases {
+                    assert!(matches!(
+                        library.character_by_id(id),
+                        Some(Character::MovieClip(_))
+                    ));
+                    assert!(library.instantiate_by_id(id, context.gc()).is_some());
+                }
+                let expected_last = *aliases.last().unwrap();
+                assert_eq!(
+                    library.character_id_by_import_name(&name),
+                    Some(expected_last)
+                );
+                assert_eq!(
+                    library.character_by_export_name(&name).unwrap().0,
+                    expected_last
+                );
+                if aliases.contains(&99) {
+                    let first = library.instantiate_by_id(35, context.gc()).unwrap();
+                    let second = library.instantiate_by_id(99, context.gc()).unwrap();
+                    assert!(!DisplayObject::ptr_eq(first, second));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn import_aliases_are_scoped_to_their_request_in_either_completion_order() {
+        for reverse in [false, true] {
+            let player = crate::player::PlayerBuilder::new()
+                .with_movie(SwfMovieData::empty(8, None))
+                .build();
+            let mut player = player.lock().unwrap();
+            player.mutate_with_update_context(|context| {
+                let root = context.stage.root_clip().unwrap().as_movie_clip().unwrap();
+                let importer = root.movie();
+                let name = AvmString::new_utf8(context.gc(), "synthetic_alias");
+                let mut requests = Vec::new();
+                for aliases in [&[35, 99][..], &[44][..]] {
+                    let exporter = SwfMovie::new(context.gc(), SwfMovieData::empty(8, None));
+                    let prototype = MovieClip::new(exporter, context.gc());
+                    context
+                        .library
+                        .library_for_movie_mut(exporter)
+                        .register_character(7, Character::MovieClip(prototype));
+                    let declarations = aliases
+                        .iter()
+                        .map(|&id| (name.as_wstr().to_owned(), id))
+                        .collect();
+                    for &id in aliases {
+                        context
+                            .library
+                            .library_for_movie_mut(importer)
+                            .register_import(name, id);
+                    }
+                    requests.push((
+                        MovieClip::new_import_assets(context, exporter, root, declarations),
+                        exporter,
+                        aliases,
+                    ));
+                }
+                if reverse {
+                    requests.reverse();
+                }
+                let mut payload = vec![1, 0, 7, 0];
+                payload.extend_from_slice(b"synthetic_alias\0");
+                for (index, (imported, exporter, aliases)) in requests.iter().enumerate() {
+                    imported
+                        .0
+                        .shared
+                        .get()
+                        .export_assets(context, &mut SwfStream::new(&payload, 8))
+                        .unwrap();
+                    let library = context.library.library_for_movie(importer).unwrap();
+                    for &id in *aliases {
+                        let instance = library.instantiate_by_id(id, context.gc()).unwrap();
+                        assert_eq!(instance.movie(), *exporter);
+                    }
+                    // The first completed request must not claim pending aliases.
+                    if index == 0 {
+                        for &pending in requests[1].2 {
+                            assert!(library.character_by_id(pending).is_none());
+                        }
+                    }
+                    assert_eq!(library.character_id_by_import_name(&name), Some(44));
+                }
+                let library = context.library.library_for_movie(importer).unwrap();
+                for (_, exporter, aliases) in &requests {
+                    for &id in *aliases {
+                        assert_eq!(
+                            library.instantiate_by_id(id, context.gc()).unwrap().movie(),
+                            *exporter
+                        );
+                    }
+                }
+            });
         }
     }
 }

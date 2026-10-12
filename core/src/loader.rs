@@ -34,7 +34,7 @@ use crate::events::ClipEvent;
 use crate::limits::ExecutionLimit;
 use crate::player::{Player, PostFrameCallback};
 use crate::streams::{NetStream, NetStreamHandle};
-use crate::string::{AvmString, StringContext};
+use crate::string::{AvmString, StringContext, WString};
 use crate::tag_utils::{SwfMovie, SwfMovieData};
 use crate::vminterface::Instantiator;
 use chardetng::EncodingDetector;
@@ -330,6 +330,7 @@ impl<'gc> LoadManager<'gc> {
         uc: &UpdateContext<'gc>,
         request: Request,
         importer_movie: MovieClip<'gc>,
+        imported_assets: Vec<(WString, swf::CharacterId)>,
     ) -> OwnedFuture<(), Error> {
         // TODO: Observe more closely how this should behave in AVM2.
         // It looks like AVM2 is more strict than AVM1 regarding when
@@ -362,7 +363,12 @@ impl<'gc> LoadManager<'gc> {
 
                             let movie = SwfMovie::new(uc.gc(), movie);
 
-                            let clip = MovieClip::new_import_assets(uc, movie, importer_movie);
+                            let clip = MovieClip::new_import_assets(
+                                uc,
+                                movie,
+                                importer_movie,
+                                imported_assets,
+                            );
 
                             clip.set_cur_preload_frame(0);
                             let mut execution_limit = ExecutionLimit::none();
