@@ -1216,6 +1216,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let object = object_val.coerce_to_object_or_bare(self)?;
 
         let result = object.get(name, self)?;
+        if result == Value::Undefined {
+            super::missing_calls::log_api_identifier(&name);
+        }
         self.stack_push(result);
 
         Ok(FrameControl::Continue)
@@ -1278,6 +1281,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let path = var_path.coerce_to_string(self)?;
 
         let value: Value<'gc> = self.get_variable(path)?.into();
+
+        if value == Value::Undefined {
+            super::missing_calls::log_api_identifier(&path);
+        }
 
         let value = if self.swf_version() <= 4 {
             value.as_swf4_variable()
@@ -3229,6 +3236,34 @@ mod missing_call_tests {
             }
 
             // The next VM operation still executes.
+            activation.context.avm1.push(41.0.into());
+            activation.action_increment()?;
+            assert_eq!(activation.context.avm1.pop(), 42.0.into());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn missing_api_lookups_preserve_undefined_and_continue() {
+        with_avm(7, |activation, this| {
+            for name in ["SyntheticHostAPI", "SyntheticIgnoredField"] {
+                let name = AvmString::new_utf8(activation.gc(), name);
+                activation.context.avm1.push(name.into());
+                assert!(matches!(
+                    activation.action_get_variable()?,
+                    FrameControl::Continue
+                ));
+                assert_eq!(activation.context.avm1.pop(), Value::Undefined);
+
+                activation.context.avm1.push(this.into());
+                activation.context.avm1.push(name.into());
+                assert!(matches!(
+                    activation.action_get_member()?,
+                    FrameControl::Continue
+                ));
+                assert_eq!(activation.context.avm1.pop(), Value::Undefined);
+            }
+
             activation.context.avm1.push(41.0.into());
             activation.action_increment()?;
             assert_eq!(activation.context.avm1.pop(), 42.0.into());

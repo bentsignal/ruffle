@@ -1,6 +1,6 @@
 //! Opt-in native diagnostics for calls AVM1 otherwise ignores silently.
 //!
-//! Reports only a callable name and receiver type, with a bounded number of
+//! Reports only callable/API identifier names and types, with a bounded number of
 //! distinct records. It does not expose argument values or executable content.
 
 use crate::string::WStr;
@@ -9,11 +9,31 @@ use std::sync::{Mutex, OnceLock};
 
 const MAX_RECORDS: usize = 256;
 const MAX_NAME_UNITS: usize = 128;
+static RECORDS: OnceLock<Mutex<Records>> = OnceLock::new();
 
 fn bounded_name(name: &WStr) -> String {
     name[..name.len().min(MAX_NAME_UNITS)]
         .to_utf8_lossy()
         .into_owned()
+}
+
+pub(super) fn log_api_identifier(name: &WStr) {
+    if enabled() && is_api_identifier(name) {
+        log(name, "undefined");
+    }
+}
+
+fn is_api_identifier(name: &WStr) -> bool {
+    name.len() <= MAX_NAME_UNITS
+        && (name
+            .find(WStr::from_units(b"CScaleformComponent_"))
+            .is_some()
+            || name.ends_with(WStr::from_units(b"API")))
+}
+
+fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CSR_AVM_MISSING_CALLS").as_deref() == Ok("1"))
 }
 
 #[derive(Default)]
@@ -26,9 +46,7 @@ impl Records {
 }
 
 pub(super) fn log(name: &WStr, receiver_type: &'static str) {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    static RECORDS: OnceLock<Mutex<Records>> = OnceLock::new();
-    if !*ENABLED.get_or_init(|| std::env::var("CSR_AVM_MISSING_CALLS").as_deref() == Ok("1")) {
+    if !enabled() {
         return;
     }
 
@@ -44,6 +62,37 @@ pub(super) fn log(name: &WStr, receiver_type: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_identifiers_match_only_the_bounded_native_patterns() {
+        assert!(is_api_identifier(WStr::from_units(b"SyntheticHostAPI")));
+        assert!(is_api_identifier(WStr::from_units(
+            b"_global.CScaleformComponent_Test"
+        )));
+        assert!(!is_api_identifier(WStr::from_units(b"hitArea")));
+        assert!(!is_api_identifier(WStr::from_units(b"synthetic_value")));
+        let overlong = vec![b'A'; MAX_NAME_UNITS + 1];
+        assert!(!is_api_identifier(WStr::from_units(overlong.as_slice())));
+    }
+
+    #[test]
+    fn api_records_follow_the_process_opt_in_and_filter() {
+        let matching = WStr::from_units(b"SyntheticRecordedHostAPI");
+        let ignored = WStr::from_units(b"SyntheticIgnoredField");
+        log_api_identifier(matching);
+        log_api_identifier(ignored);
+        let records = RECORDS.get().map(|records| records.lock().unwrap());
+        let contains = |name| {
+            records
+                .as_ref()
+                .is_some_and(|records| records.0.contains(&(name, "undefined")))
+        };
+        assert_eq!(contains("SyntheticRecordedHostAPI".into()), enabled());
+        assert!(!contains("SyntheticIgnoredField".into()));
+        if !enabled() {
+            assert!(records.is_none());
+        }
+    }
 
     #[test]
     fn names_are_bounded_before_utf8_conversion() {
