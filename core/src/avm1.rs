@@ -18,6 +18,7 @@ mod error;
 mod flv;
 mod fscommand;
 pub(crate) mod globals;
+mod missing_calls;
 mod object;
 mod object_reference;
 mod parameters;
