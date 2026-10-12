@@ -337,7 +337,7 @@ impl<'gc> LoadManager<'gc> {
         // something is not a valid import, and doesn't continue
         // executing when that is the case(?).
         let player = uc.player_handle();
-        let importer_movie = MovieClipHandle::stash(uc, importer_movie);
+        let importer_handle = MovieClipHandle::stash_import_assets(uc, importer_movie);
 
         Box::pin(async move {
             let fetch = player.lock().unwrap().fetch(request, FetchReason::LoadSwf);
@@ -350,7 +350,9 @@ impl<'gc> LoadManager<'gc> {
                     tracing::info!("Loading imported movie: {:?}", url);
 
                     player.lock().unwrap().mutate_with_update_context(|uc| {
-                        let importer_movie = importer_movie.fetch(uc);
+                        let Some(importer_movie) = importer_handle.fetch(uc) else {
+                            return;
+                        };
 
                         if matches!(content_type, ContentType::Swf) {
                             let movie = SwfMovieData::from_data(
@@ -386,14 +388,14 @@ impl<'gc> LoadManager<'gc> {
                             // Unfinished means the imported movie is waiting on its own
                             // import; `finish_importing` releases our importer later.
                             if res {
-                                importer_movie.finish_importing(uc);
+                                importer_handle.finish_importing(uc);
                             }
                         } else {
                             tracing::warn!(
                                 "Unsupported content type for ImportAssets: {:?}",
                                 content_type
                             );
-                            importer_movie.finish_importing(uc);
+                            importer_handle.finish_importing(uc);
                         }
                     });
                     Ok(())
