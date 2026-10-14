@@ -313,16 +313,20 @@ pub enum ClipEvent<'gc> {
 }
 
 impl ClipEvent<'_> {
-    /// Method names for button event handles.
-    pub const BUTTON_EVENT_METHODS: [&'static str; 7] = [
-        "onDragOver",
-        "onDragOut",
-        "onPress",
-        "onRelease",
-        "onReleaseOutside",
-        "onRollOut",
-        "onRollOver",
-    ];
+    /// Method names for button event handlers, using the existing common atoms.
+    /// Picking consults these for every visited clip; do not allocate fresh
+    /// strings or cache the property lookup (which must see current script state).
+    pub fn button_event_methods<'gc>(ctx: &StringContext<'gc>) -> [AvmString<'gc>; 7] {
+        [
+            istr!(ctx, "onDragOver"),
+            istr!(ctx, "onDragOut"),
+            istr!(ctx, "onPress"),
+            istr!(ctx, "onRelease"),
+            istr!(ctx, "onReleaseOutside"),
+            istr!(ctx, "onRollOut"),
+            istr!(ctx, "onRollOver"),
+        ]
+    }
 
     pub const BUTTON_EVENT_FLAGS: ClipEventFlag = ClipEventFlag::from_bits_truncate(
         ClipEventFlag::DRAG_OUT.bits()

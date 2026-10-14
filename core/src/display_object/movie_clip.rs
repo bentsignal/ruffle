@@ -2376,13 +2376,9 @@ impl<'gc> MovieClip<'gc> {
                 self.avm1_root(),
             );
 
-            ClipEvent::BUTTON_EVENT_METHODS
-                .iter()
-                .copied()
-                .any(|handler| {
-                    let handler = AvmString::new_utf8(activation.gc(), handler);
-                    object.has_property(&mut activation, handler)
-                })
+            ClipEvent::button_event_methods(&activation.context.strings)
+                .into_iter()
+                .any(|handler| object.has_property(&mut activation, handler))
         } else {
             false
         }
